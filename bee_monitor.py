@@ -176,6 +176,23 @@ def index():
     return Response(PAGE, mimetype="text/html")
 
 
+@app.route("/health")
+def health():
+    import shutil
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            ffmpeg = None
+    return jsonify({
+        "ok": True,
+        "db": os.path.abspath(DB_PATH),
+        "ffmpeg": bool(ffmpeg),
+    })
+
+
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
     hive = (request.form.get("hive") or "").strip()
@@ -405,6 +422,14 @@ PAGE = r"""<!DOCTYPE html>
 </main>
 
 <script>
+function safeJson(r){
+  var ct = (r.headers.get('content-type')||'');
+  if(!ct.includes('application/json')){
+    return r.text().then(function(){ throw new Error('Сервер просыпается — повторите через 30 секунд'); });
+  }
+  return r.json();
+}
+
 const $ = id => document.getElementById(id);
 let currentRows = [], sortKey = 'ts', sortDir = -1, rec = null, chunks = [];
 
@@ -440,7 +465,7 @@ function sendAudio(blob, name) {
   fd.append('save', '1');
   if ($('temp').value) fd.append('temp_c', $('temp').value);
   fetch('/api/analyze', { method: 'POST', body: fd })
-    .then(r => r.json())
+    .then(safeJson)
     .then(d => {
       if (d.error) { $('status').textContent = 'Ошибка: ' + d.error; return; }
       $('status').textContent = 'Готово, сохранено';
@@ -526,7 +551,7 @@ function drawSpectrum(freqs, mag, peak) {
 function loadHistory() {
   const hive = $('hiveFilter').value, days = $('daysFilter').value;
   fetch(`/api/history?hive=${encodeURIComponent(hive)}&days=${days}`)
-    .then(r => r.json())
+    .then(safeJson)
     .then(d => {
       currentRows = d.rows;
       const sel = $('hiveFilter');
@@ -537,7 +562,7 @@ function loadHistory() {
       drawTrend();
     });
   fetch(`/api/stats?hive=${encodeURIComponent(hive)}`)
-    .then(r => r.json())
+    .then(safeJson)
     .then(s => {
       const el = $('stats');
       if (!s.count) { el.innerHTML = ''; return; }
