@@ -171,6 +171,9 @@ def analyze_signal(audio: np.ndarray, sr: int):
 
 
 # ---------------------------------------------------------------- API
+init_db()
+
+
 @app.route("/")
 def index():
     return Response(PAGE, mimetype="text/html")
