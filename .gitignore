@@ -1,1 +1,5 @@
 bees.db
+
+# локальные бэкапы
+*.bak
+bee_monitor_copy.py
