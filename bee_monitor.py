@@ -151,6 +151,75 @@ def read_audio(data: bytes):
     return np.asarray(audio, dtype=np.float32), int(sr)
 
 
+def voice_check(f, pxx, peak_hz):
+    """
+    Голос vs жужжание по форме спектра:
+      - «гребёнка» гармоник (пики на кратных частотах) => голос
+      - широкое плато 300-900 Гц без гребёнки => пчёлы
+    """
+    db = 10 * np.log10(pxx + 1e-18)
+
+    lo, hi = 70, 500
+    band = (f >= lo) & (f <= hi)
+    if band.sum() < 10:
+        return False, "", {}
+    fb, fdb = f[band], db[band]
+
+    thr = float(np.median(fdb)) + 6.0
+    peaks = []
+    for i in range(1, len(fdb) - 1):
+        if fdb[i] > fdb[i-1] and fdb[i] > fdb[i+1] and fdb[i] > thr:
+            peaks.append((float(fb[i]), float(fdb[i])))
+
+    peaks.sort(key=lambda x: -x[1])
+    peaks = peaks[:6]
+    peaks.sort()
+
+    comb_hits = 0
+    comb_info = []
+    for i, (f1, _) in enumerate(peaks):
+        for f2, _ in peaks[i+1:]:
+            if f1 <= 0:
+                continue
+            ratio = f2 / f1
+            for h in (2, 3, 4):
+                if abs(ratio - h) < 0.08:
+                    comb_hits += 1
+                    comb_info.append("%.0fx%d" % (f1, h))
+                    break
+
+    bee_band = (f >= 300) & (f <= 900)
+    if bee_band.sum() > 3:
+        bdb = db[bee_band]
+        bee_span = float(np.percentile(bdb, 90) - np.percentile(bdb, 10))
+        bee_level = float(np.median(bdb))
+    else:
+        bee_span, bee_level = 0.0, -200.0
+
+    low_peak_hz, low_peak_db = (peaks[0] if peaks else (0.0, -200.0))
+    total_db = float(np.max(db[(f >= 40) & (f <= 2000)]))
+
+    ratios = {
+        "comb_hits": comb_hits,
+        "peaks_hz": [round(p[0], 1) for p in peaks],
+        "bee_span_db": round(bee_span, 1),
+        "bee_level_db": round(bee_level, 1),
+        "low_peak_hz": round(low_peak_hz, 1),
+        "low_peak_db": round(low_peak_db, 1),
+    }
+
+    reasons = []
+    if comb_hits >= 2 and low_peak_hz <= 320:
+        reasons.append("гармоническая решётка (%s) в полосе голоса" % ", ".join(comb_info[:3]))
+    if low_peak_hz <= 260 and (low_peak_db - bee_level) > 10:
+        reasons.append("одиночный пик %.0f Гц выше плато на %.0f дБ"
+                       % (low_peak_hz, low_peak_db - bee_level))
+    if bee_span < 3 and bee_level > total_db - 25:
+        reasons.append("спектр плоский — похоже на ветер или гул, а не пчёл")
+
+    return bool(reasons), "; ".join(reasons), ratios
+
+
 def analyze_signal(audio: np.ndarray, sr: int):
     if len(audio) < sr * 0.3:
         raise RuntimeError("Слишком короткая запись (нужно >= 0.3 с)")
@@ -166,8 +235,19 @@ def analyze_signal(audio: np.ndarray, sr: int):
     confidence = float(pxx[win].sum() / (pxx[f <= 2000].sum() + 1e-12))
     rms_db = float(20 * np.log10(np.sqrt(np.mean(audio ** 2)) + 1e-12))
 
+    is_voice, voice_reason, ratios = voice_check(f, pxx, peak_hz)
+
     step = max(1, len(f) // 1200)
-    return peak_hz, min(confidence, 1.0), rms_db, f[::step].tolist(), mag_db[::step].tolist()
+    return {
+        "peak_hz": peak_hz,
+        "confidence": min(confidence, 1.0),
+        "rms_db": rms_db,
+        "chart_f": f[::step].tolist(),
+        "chart_db": mag_db[::step].tolist(),
+        "is_voice": is_voice,
+        "voice_reason": voice_reason,
+        "ratios": ratios,
+    }
 
 
 # ---------------------------------------------------------------- API
@@ -209,9 +289,22 @@ def api_analyze():
         return jsonify(error="Аудио не передано")
     try:
         audio, sr = read_audio(request.files["audio"].read())
-        peak_hz, conf, rms_db, freqs, mag = analyze_signal(audio, sr)
+        res = analyze_signal(audio, sr)
     except Exception as e:
         return jsonify(error=str(e))
+
+    peak_hz = res["peak_hz"]
+    conf    = res["confidence"]
+    rms_db  = res["rms_db"]
+
+    if res["is_voice"] and save:
+        return jsonify(
+            error=("Похоже на голос или посторонний шум, а не на пчёл ("
+                   + res["voice_reason"] + "). Повторите замер молча, "
+                   "микрофон ближе к летку."),
+            is_voice=True,
+            ratios=res["ratios"],
+        )
 
     state, advice = recommend(peak_hz, rms_db, temp_c)
     rec_id = None
@@ -230,7 +323,9 @@ def api_analyze():
 
     return jsonify(id=rec_id, hive=hive, peak_hz=peak_hz, confidence=conf,
                    rms_db=rms_db, temp_c=temp_c, state=state, advice=advice,
-                   saved=bool(save), freqs=freqs, mag_db=mag)
+                   saved=bool(save), freqs=res["chart_f"], mag_db=res["chart_db"],
+                   is_voice=res["is_voice"], voice_reason=res["voice_reason"],
+                   ratios=res["ratios"])
 
 
 @app.route("/api/history")
@@ -470,8 +565,23 @@ function sendAudio(blob, name) {
   fetch('/api/analyze', { method: 'POST', body: fd })
     .then(safeJson)
     .then(d => {
-      if (d.error) { $('status').textContent = 'Ошибка: ' + d.error; return; }
-      $('status').textContent = 'Готово, сохранено';
+      if (d.error) {
+        var r = d.ratios || {};
+        var extra = d.ratios
+          ? '<br><small>гармоник ' + (r.comb_hits ?? 0)
+            + ' · пик ' + (r.low_peak_hz ?? '?') + ' Гц'
+            + ' · плато ' + (r.bee_span_db ?? '?') + ' дБ'
+            + (r.peaks_hz && r.peaks_hz.length ? ' · peaks ' + r.peaks_hz.join(', ') : '')
+            + '</small>'
+          : '';
+        $('status').innerHTML = '\u26A0\uFE0F ' + d.error + extra;
+        return;
+      }
+      var r = d.ratios || {};
+      $('status').innerHTML = 'Готово, сохранено'
+        + ' <small style="color:#999">(гармоник ' + (r.comb_hits ?? 0)
+        + ' · пик ' + (r.low_peak_hz ?? '?') + ' Гц'
+        + ' · плато ' + (r.bee_span_db ?? '?') + ' дБ)</small>';
       showResult(d);
       loadHistory();
     })
