@@ -568,20 +568,32 @@ function sendAudio(blob, name) {
       if (d.error) {
         var r = d.ratios || {};
         var extra = d.ratios
-          ? '<br><small>гармоник ' + (r.comb_hits ?? 0)
+          ? '<div style="margin-top:6px;font-size:12px;color:#8a6d3b">'
+            + 'гармоник ' + (r.comb_hits ?? 0)
             + ' · пик ' + (r.low_peak_hz ?? '?') + ' Гц'
             + ' · плато ' + (r.bee_span_db ?? '?') + ' дБ'
-            + (r.peaks_hz && r.peaks_hz.length ? ' · peaks ' + r.peaks_hz.join(', ') : '')
-            + '</small>'
+            + ' · низ ' + ((r.low_share ?? 0) * 100).toFixed(0) + '%'
+            + ' · спад ' + (r.falloff_db ?? '?') + ' дБ'
+            + (r.peaks_hz && r.peaks_hz.length ? '<br>пики: ' + r.peaks_hz.join(', ') + ' Гц' : '')
+            + '</div>'
           : '';
-        $('status').innerHTML = '\u26A0\uFE0F ' + d.error + extra;
+        $('status').innerHTML =
+          '<div style="background:#fff8e1;border-left:4px solid #f2b705;'
+          + 'padding:10px 14px;border-radius:6px;line-height:1.5;margin-top:8px">'
+          + '<b style="color:#b26a00">\u26A0\uFE0F Замер отклонён</b> — похоже на голос '
+          + 'или посторонний шум, а не на пчёл.<br>'
+          + String(d.error)
+          + '<br><span style="color:#777">Повторите замер молча, микрофон ближе к летку.</span>'
+          + extra + '</div>';
         return;
       }
       var r = d.ratios || {};
       $('status').innerHTML = 'Готово, сохранено'
         + ' <small style="color:#999">(гармоник ' + (r.comb_hits ?? 0)
         + ' · пик ' + (r.low_peak_hz ?? '?') + ' Гц'
-        + ' · плато ' + (r.bee_span_db ?? '?') + ' дБ)</small>';
+        + ' · плато ' + (r.bee_span_db ?? '?') + ' дБ'
+        + ' · низ ' + ((r.low_share ?? 0) * 100).toFixed(0) + '%'
+        + ' · спад ' + (r.falloff_db ?? '?') + ' дБ)</small>';
       showResult(d);
       loadHistory();
     })
