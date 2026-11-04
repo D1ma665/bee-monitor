@@ -152,15 +152,10 @@ def read_audio(data: bytes):
 
 
 def voice_check(f, pxx, peak_hz):
-    """
-    Голос vs жужжание по форме спектра:
-      - «гребёнка» гармоник (пики на кратных частотах) => голос
-      - широкое плато 300-900 Гц без гребёнки => пчёлы
-    """
+    """Голос vs жужжание по форме спектра."""
     db = 10 * np.log10(pxx + 1e-18)
 
-    lo, hi = 70, 500
-    band = (f >= lo) & (f <= hi)
+    band = (f >= 70) & (f <= 500)
     if band.sum() < 10:
         return False, "", {}
     fb, fdb = f[band], db[band]
@@ -168,22 +163,20 @@ def voice_check(f, pxx, peak_hz):
     thr = float(np.median(fdb)) + 6.0
     peaks = []
     for i in range(1, len(fdb) - 1):
-        if fdb[i] > fdb[i-1] and fdb[i] > fdb[i+1] and fdb[i] > thr:
+        if fdb[i] > fdb[i - 1] and fdb[i] > fdb[i + 1] and fdb[i] > thr:
             peaks.append((float(fb[i]), float(fdb[i])))
-
     peaks.sort(key=lambda x: -x[1])
     peaks = peaks[:6]
     peaks.sort()
 
-    comb_hits = 0
-    comb_info = []
+    comb_hits, comb_info = 0, []
     for i, (f1, _) in enumerate(peaks):
-        for f2, _ in peaks[i+1:]:
+        for f2, _ in peaks[i + 1:]:
             if f1 <= 0:
                 continue
             ratio = f2 / f1
             for h in (2, 3, 4):
-                if abs(ratio - h) < 0.08:
+                if abs(ratio - h) < 0.12:
                     comb_hits += 1
                     comb_info.append("%.0fx%d" % (f1, h))
                     break
@@ -199,23 +192,36 @@ def voice_check(f, pxx, peak_hz):
     low_peak_hz, low_peak_db = (peaks[0] if peaks else (0.0, -200.0))
     total_db = float(np.max(db[(f >= 40) & (f <= 2000)]))
 
+    e_low = float(pxx[(f >= 60) & (f < 300)].sum())
+    e_mid = float(pxx[(f >= 300) & (f < 900)].sum())
+    low_share = e_low / (e_low + e_mid + 1e-12)
+
+    hi_band = (f >= 700) & (f <= 1500)
+    hi_level = float(np.median(db[hi_band])) if hi_band.any() else -200.0
+    falloff = low_peak_db - hi_level
+
     ratios = {
         "comb_hits": comb_hits,
-        "peaks_hz": [round(p[0], 1) for p in peaks],
+        "peaks_hz": [round(x[0], 1) for x in peaks],
         "bee_span_db": round(bee_span, 1),
         "bee_level_db": round(bee_level, 1),
         "low_peak_hz": round(low_peak_hz, 1),
         "low_peak_db": round(low_peak_db, 1),
+        "low_share": round(low_share, 3),
+        "falloff_db": round(falloff, 1),
     }
 
     reasons = []
     if comb_hits >= 2 and low_peak_hz <= 320:
-        reasons.append("гармоническая решётка (%s) в полосе голоса" % ", ".join(comb_info[:3]))
-    if low_peak_hz <= 260 and (low_peak_db - bee_level) > 10:
-        reasons.append("одиночный пик %.0f Гц выше плато на %.0f дБ"
-                       % (low_peak_hz, low_peak_db - bee_level))
+        reasons.append("гармоническая решётка (%s)" % ", ".join(comb_info[:3]))
+    if low_peak_hz <= 260 and (low_peak_db - bee_level) > 6:
+        reasons.append("пик %.0f Гц выше плато на %.0f дБ" % (low_peak_hz, low_peak_db - bee_level))
+    if low_share > 0.7 and low_peak_hz <= 280:
+        reasons.append("доминирует энергия ниже 300 Гц (%.0f%%)" % (low_share * 100))
+    if falloff > 25 and low_peak_hz <= 300:
+        reasons.append("спектр спадает с частотой на %.0f дБ" % falloff)
     if bee_span < 3 and bee_level > total_db - 25:
-        reasons.append("спектр плоский — похоже на ветер или гул, а не пчёл")
+        reasons.append("спектр плоский — похоже на ветер или гул")
 
     return bool(reasons), "; ".join(reasons), ratios
 
