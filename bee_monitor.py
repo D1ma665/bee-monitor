@@ -588,7 +588,7 @@ function sendAudio(blob, name) {
           + 'padding:10px 14px;border-radius:6px;line-height:1.5;margin-top:8px">'
           + '<b style="color:#b26a00">\u26A0\uFE0F Замер отклонён</b> — похоже на голос '
           + 'или посторонний шум, а не на пчёл.<br>'
-          + String(d.error)
+          + String(d.error).split('(')[1]?.split(')')[0] || ''
           + '<br><span style="color:#777">Повторите замер молча, микрофон ближе к летку.</span>'
           + extra + '</div>';
         return;
