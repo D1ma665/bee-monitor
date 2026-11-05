@@ -8,6 +8,9 @@
 import io
 import os
 import sqlite3
+import urllib.request
+import json as _json
+import time as _time
 import subprocess
 import tempfile
 import numpy as np
@@ -260,6 +263,47 @@ def analyze_signal(audio: np.ndarray, sr: int):
 init_db()
 
 
+# ---------------- Погода (wttr.in, без ключа) ----------------
+WEATHER_LAT = 55.75   # ← координаты вашей пасеки
+WEATHER_LON = 37.62
+_weather_cache = {"ts": 0.0, "data": None}
+
+
+def fetch_weather(lat=WEATHER_LAT, lon=WEATHER_LON):
+    """Текущая погода с кэшем 30 минут."""
+    now = _time.time()
+    if _weather_cache["data"] and now - _weather_cache["ts"] < 1800:
+        return _weather_cache["data"]
+
+    url = "https://wttr.in/%.4f,%.4f?format=j1" % (lat, lon)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "curl/8"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            raw = _json.loads(r.read().decode("utf-8"))
+        cur = (raw.get("current_condition") or [{}])[0]
+        data = {
+            "temp_c": float(cur["temp_C"]) if cur.get("temp_C") else None,
+            "wind_ms": round(float(cur.get("windspeedKmph", 0)) / 3.6, 1),
+            "precip_mm": float(cur.get("precipMM", 0) or 0),
+            "cloud_pct": int(cur.get("cloudcover", 0) or 0),
+            "humidity": int(cur.get("humidity", 0) or 0),
+            "source": "wttr.in",
+        }
+    except Exception as e:
+        data = {"temp_c": None, "error": str(e), "source": "wttr.in"}
+
+    _weather_cache["ts"] = now
+    _weather_cache["data"] = data
+    return data
+
+
+@app.route("/api/weather")
+def api_weather():
+    lat = float(request.args.get("lat", WEATHER_LAT))
+    lon = float(request.args.get("lon", WEATHER_LON))
+    return jsonify(fetch_weather(lat, lon))
+
+
 @app.route("/")
 def index():
     return Response(PAGE, mimetype="text/html")
@@ -290,6 +334,8 @@ def api_analyze():
     save = request.form.get("save", "1") == "1"
     temp_raw = request.form.get("temp_c")
     temp_c = float(temp_raw) if temp_raw not in (None, "") else None
+    if temp_c is None:
+        temp_c = fetch_weather().get("temp_c")
 
     if "audio" not in request.files:
         return jsonify(error="Аудио не передано")
@@ -567,6 +613,17 @@ function sendAudio(blob, name) {
   fd.append('audio', blob, name);
   fd.append('hive', hive);
   fd.append('save', '1');
+  // температура подставляется из погоды, если поле пустое
+  if (!$('temp').dataset.loaded) {
+    $('temp').dataset.loaded = '1';
+    fetch('/api/weather').then(safeJson).then(w => {
+      if (w.temp_c != null && !$('temp').value) {
+        $('temp').value = Math.round(w.temp_c * 10) / 10;
+        $('temp').placeholder = 'API: ' + Math.round(w.temp_c) + ' °C';
+      }
+    }).catch(() => {});
+  }
+
   if ($('temp').value) fd.append('temp_c', $('temp').value);
   fetch('/api/analyze', { method: 'POST', body: fd })
     .then(safeJson)
