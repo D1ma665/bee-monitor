@@ -354,6 +354,63 @@ def health():
     })
 
 
+@app.route("/api/hives")
+def hives_list():
+    con = get_db()
+    rows = [dict(r) for r in con.execute(
+        "SELECT id, name, note, norm_hz FROM hives WHERE active = 1 ORDER BY name")]
+    return jsonify(rows=rows)
+
+
+@app.route("/api/hives", methods=["POST"])
+def hive_add():
+    name = (request.form.get("name") or "").strip()
+    note = (request.form.get("note") or "").strip() or None
+    norm = request.form.get("norm_hz") or None
+    if not name:
+        return jsonify(error="Имя улья не может быть пустым"), 400
+
+    con = get_db()
+    if con.execute("SELECT 1 FROM hives WHERE name = ? AND active = 1",
+                   (name,)).fetchone():
+        return jsonify(error="Улей с таким именем уже есть"), 400
+
+    con.execute("INSERT INTO hives(name, note, norm_hz, active, created_at) "
+                "VALUES (?, ?, ?, 1, ?)",
+                (name, note, float(norm) if norm else 224,
+                 datetime.now().isoformat(timespec="seconds")))
+    con.commit()
+    return jsonify(ok=True)
+
+
+@app.route("/api/hives/<int:hid>/rename", methods=["POST"])
+def hive_rename(hid):
+    name = (request.form.get("name") or "").strip()
+    if not name:
+        return jsonify(error="Пустое имя"), 400
+    con = get_db()
+    con.execute("UPDATE hives SET name = ? WHERE id = ?", (name, hid))
+    con.commit()
+    return jsonify(ok=True)
+
+
+@app.route("/api/hives/<int:hid>/delete", methods=["POST"])
+def hive_delete(hid):
+    """Мягкое удаление: история замеров сохраняется."""
+    con = get_db()
+    con.execute("UPDATE hives SET active = 0 WHERE id = ?", (hid,))
+    con.commit()
+    return jsonify(ok=True)
+
+
+@app.route("/api/hives/<int:hid>/restore", methods=["POST"])
+def hive_restore(hid):
+    con = get_db()
+    con.execute("UPDATE hives SET active = 1 WHERE id = ?", (hid,))
+    con.commit()
+    return jsonify(ok=True)
+
+
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
     hive = (request.form.get("hive") or "").strip()
