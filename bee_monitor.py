@@ -251,9 +251,10 @@ def voice_check(f, pxx, peak_hz):
         reasons.append("доминирует энергия ниже 300 Гц (%.0f%%)" % (low_share * 100))
     if falloff > 25 and low_peak_hz <= 300:
         reasons.append("спектр спадает с частотой на %.0f дБ" % falloff)
-    if bee_span < 3 and bee_level > total_db - 25:
+    if bee_span < 1.2 and bee_level > total_db - 6:
         reasons.append("спектр плоский — похоже на ветер или гул")
 
+    print("[voice_check]", ratios, "reasons:", reasons or "-")
     return bool(reasons), "; ".join(reasons), ratios
 
 
@@ -413,7 +414,24 @@ def hive_restore(hid):
 
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
-    hive = (request.form.get("hive") or "").strip()
+    hive_raw = (request.form.get("hive") or "").strip()
+    hive_id = int(hive_raw) if hive_raw.isdigit() else None
+    con = get_db()
+    row = con.execute("SELECT id, name FROM hives WHERE id = ?", (hive_id,)).fetchone() \
+          if hive_id is not None else None
+    if not row and hive_raw and not hive_raw.isdigit():
+        # запасной путь: пришло имя текстом
+        row = con.execute("SELECT id, name FROM hives WHERE name = ? AND active = 1",
+                          (hive_raw,)).fetchone()
+        if row:
+            hive_id, hive = row["id"], row["name"]
+        else:
+            hive = hive_raw
+    elif row:
+        hive = row["name"]
+    else:
+        hive = None
+
     if not hive:
         return jsonify(error="Не указан улей")
     save = request.form.get("save", "1") == "1"
@@ -447,12 +465,11 @@ def api_analyze():
     rec_id = None
 
     if save:
-        con = get_db()
         cleanup_old(con)
         cur = con.execute(
-            "INSERT INTO measurements (hive, ts, peak_hz, confidence, rms_db, temp_c, state, advice)"
-            " VALUES (?,?,?,?,?,?,?,?)",
-            (hive, datetime.now().isoformat(timespec="seconds"),
+            "INSERT INTO measurements (hive, hive_id, ts, peak_hz, confidence, rms_db, temp_c, state, advice)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (hive, hive_id, datetime.now().isoformat(timespec="seconds"),
              peak_hz, conf, rms_db, temp_c, state, advice),
         )
         con.commit()
@@ -578,8 +595,9 @@ PAGE = r"""<!DOCTYPE html>
   <!-- ЗАПИСЬ -->
   <div class="card">
     <div class="row" style="margin-bottom:14px">
-      <input id="hive" list="hiveList" placeholder="Улей (например: Улей 1)" style="flex:1;min-width:180px">
-      <datalist id="hiveList"></datalist>
+      <select id="hive" style="flex:1;min-width:180px"></select>
+      <button type="button" onclick="addHive()" title="Добавить улей">＋</button>
+      <button type="button" onclick="delHive()" title="Удалить выбранный улей" style="color:#c0392b">−</button>
       <input id="temp" type="number" step="0.1" placeholder="Температура °C (необяз.)" style="width:200px">
     </div>
     <div class="row">
@@ -660,7 +678,7 @@ PAGE = r"""<!DOCTYPE html>
 function safeJson(r){
   var ct = (r.headers.get('content-type')||'');
   if(!ct.includes('application/json')){
-    return r.text().then(function(){ throw new Error('Сервер просыпается — повторите через 30 секунд'); });
+    return r.text().then(function(t){ throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 300)); });
   }
   return r.json();
 }
@@ -672,7 +690,7 @@ $('file').onchange = e => { const f = e.target.files[0]; if (f) sendAudio(f, f.n
 
 $('recBtn').onclick = async () => {
   if (rec && rec.state === 'recording') { rec.stop(); return; }
-  if (!$('hive').value.trim()) { $('status').textContent = 'Сначала укажите улей'; return; }
+  if (!$('hive').value) { $('status').textContent = 'Сначала выберите улей'; return; }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     rec = new MediaRecorder(stream); chunks = [];
@@ -691,7 +709,7 @@ $('recBtn').onclick = async () => {
 };
 
 function sendAudio(blob, name) {
-  const hive = $('hive').value.trim();
+  const hive = $('hive').value;
   if (!hive) { $('status').textContent = 'Укажите улей'; return; }
   $('status').textContent = 'Анализ...';
   const fd = new FormData();
@@ -830,7 +848,7 @@ function loadHistory() {
       const sel = $('hiveFilter');
       sel.innerHTML = '<option value="all">Все ульи</option>' +
         d.hives.map(h => `<option ${h === hive ? 'selected' : ''}>${h}</option>`).join('');
-      $('hiveList').innerHTML = d.hives.map(h => `<option value="${h}">`).join('');
+      if (typeof refreshHivesSelect === 'function') refreshHivesSelect();
       renderTable();
       drawTrend();
     });
@@ -911,7 +929,60 @@ function delRec(id) {
 $('hiveFilter').onchange = loadHistory;
 $('daysFilter').onchange = loadHistory;
 $('refreshBtn').onclick = loadHistory;
+refreshHivesSelect();
 loadHistory();
+
+let HIVES = [];
+
+async function refreshHivesSelect(keep) {
+  try {
+    const r = await fetch('/api/hives');
+    const d = await r.json();
+    HIVES = d.rows || [];
+  } catch (e) { HIVES = []; }
+
+  const sel = document.getElementById('hive');
+  if (!sel) return;
+  const cur = keep || sel.value;
+  sel.innerHTML = '';
+  if (!HIVES.length) {
+    sel.innerHTML = '<option value="">- нет ульев, нажмите + -</option>';
+    return;
+  }
+  HIVES.forEach(h => {
+    const o = document.createElement('option');
+    o.value = h.id;
+    o.textContent = h.name;
+    sel.appendChild(o);
+  });
+  if (cur && HIVES.some(h => String(h.id) === String(cur))) sel.value = cur;
+}
+
+async function addHive() {
+  const name = prompt('Название нового улья:');
+  if (!name || !name.trim()) return;
+  const norm = prompt('Эталонная частота, Гц (пусто = 224):', '224');
+  const fd = new FormData();
+  fd.append('name', name.trim());
+  if (norm && norm.trim()) fd.append('norm_hz', norm.trim());
+
+  const r = await fetch('/api/hives', { method: 'POST', body: fd });
+  const d = await r.json();
+  if (!r.ok) { alert(d.error || 'Не удалось добавить'); return; }
+  await refreshHivesSelect();
+  const added = HIVES.find(h => h.name === name.trim());
+  if (added) document.getElementById('hive').value = added.id;
+}
+
+async function delHive() {
+  const sel = document.getElementById('hive');
+  if (!sel || !sel.value) return;
+  const name = sel.options[sel.selectedIndex].textContent;
+  if (!confirm('Удалить улей "' + name + '"? Замеры останутся в истории.')) return;
+  const r = await fetch('/api/hives/' + sel.value + '/delete', { method: 'POST' });
+  if (!r.ok) { alert('Не удалось удалить'); return; }
+  await refreshHivesSelect();
+}
 </script>
 </body>
 </html>
