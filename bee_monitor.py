@@ -57,6 +57,34 @@ def init_db():
             advice     TEXT
         )
     """)
+    con.execute("""CREATE TABLE IF NOT EXISTS hives (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        name       TEXT NOT NULL,
+        note       TEXT,
+        norm_hz    REAL DEFAULT 224,
+        active     INTEGER DEFAULT 1,
+        created_at TEXT
+    )""")
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_name "
+                "ON hives(name) WHERE active = 1")
+
+    # миграция: старые имена из замеров -> справочник
+    old_names = [r[0] for r in con.execute(
+        "SELECT DISTINCT hive FROM measurements WHERE hive IS NOT NULL AND hive != ''")]
+    for nm in old_names:
+        con.execute("INSERT OR IGNORE INTO hives(name, created_at) VALUES (?, ?)",
+                    (nm, datetime.now().isoformat(timespec="seconds")))
+
+    # добавить hive_id в замеры, если ещё нет
+    cols = [c[1] for c in con.execute("PRAGMA table_info(measurements)")]
+    if "hive_id" not in cols:
+        con.execute("ALTER TABLE measurements ADD COLUMN hive_id INTEGER")
+
+    # связать старые замеры
+    con.execute("""UPDATE measurements
+                   SET hive_id = (SELECT id FROM hives WHERE hives.name = measurements.hive)
+                   WHERE hive_id IS NULL""")
+
     con.execute("CREATE INDEX IF NOT EXISTS idx_hive_ts ON measurements(hive, ts)")
     con.commit()
     con.close()
